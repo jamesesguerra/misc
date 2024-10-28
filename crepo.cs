@@ -1,10 +1,11 @@
 using Dapper;
-using eqd.Context;
-using eqd.Models;
-using eqd.Interfaces;
 using System.Text;
+using SM.Detection.API.Context;
+using SM.Detection.API.Models;
+using Microsoft.Data.SqlClient;
+using System.Data;
 
-namespace eqd.Repositories;
+namespace SM.Detection.API.Repositories;
 
 public class ConfigurationsRepository : IConfigurationsRepository
 {
@@ -64,46 +65,40 @@ public class ConfigurationsRepository : IConfigurationsRepository
         {
             throw new ApplicationException("An error occurred while trying to retrieve the thresholds", ex);
         }
-        
+
         return thresholds;
     }
 
-    public async void UpsertThresholds(IEnumerable<Threshold> thresholds)
+    public async Task<bool> UpsertThresholds(IEnumerable<Threshold> thresholds)
     {
         var existingThresholds = thresholds.Where(t => t.Id != 0);
         var newThresholds = thresholds.Where(t => t.Id == 0);
-        var existingThresholdIds = existingThresholds.Select(t => t.Id);
+        var existingThresholdIds = string.Join(',', existingThresholds.Select(t => t.Id));
 
         var createThresholdQuery = @" INSERT INTO [dbo].[Thresholds] (
-                                                    GroupId,
-                                                    ThresholdTypeId,
-                                                    CreatedBy,
-                                                    CreatedDate,
-                                                    UpdatedBy,
-                                                    UpdatedDate,
-                                                    ApprovedBy,
-                                                    AtRiskThreshold,
-                                                    NoDetectionThreshold,
-                                                    InWarningThreshold,
-                                                    FullThreshold )
-                                          VALUES (  @GroupId,
-                                                    @ThresholdTypeId,
-                                                    @CreatedBy,
-                                                    @CreatedDate,
-                                                    @UpdatedBy,
-                                                    @UpdatedDate,
-                                                    @ApprovedBy,
-                                                    @AtRiskThreshold,
-                                                    @NoDetectionThreshold,
-                                                    @InWarningThreshold,
-                                                    @FullThreshold ); ";
+                                                   GroupId,
+                                                   ThresholdTypeId,
+                                                   CreatedBy,
+                                                   CreatedDate,
+                                                   ApprovedBy,
+                                                   AtRiskThreshold,
+                                                   NoDetectionThreshold,
+                                                   InWarningThreshold,
+                                                   FullThreshold )
+                                          VALUES ( @GroupId,
+                                                   @ThresholdTypeId,
+                                                   @CreatedBy,
+                                                   @CreatedDate,
+                                                   @ApprovedBy,
+                                                   @AtRiskThreshold,
+                                                   @NoDetectionThreshold,
+                                                   @InWarningThreshold,
+                                                   @FullThreshold ); ";
 
         var updateThresholdQuery = @" UPDATE [dbo].[Thresholds]
                                           SET
                                                 GroupId = @GroupId,
                                                 ThresholdTypeId = @ThresholdTypeId,
-                                                CreatedBy = @CreatedBy,
-                                                CreatedDate = @CreatedDate,
                                                 UpdatedBy = @UpdatedBy,
                                                 UpdatedDate = @UpdatedDate,
                                                 ApprovedBy = @ApprovedBy,
@@ -112,56 +107,69 @@ public class ConfigurationsRepository : IConfigurationsRepository
                                                 InWarningThreshold = @InWarningThreshold,
                                                 FullThreshold = @FullThreshold
                                           WHERE Id = @Id";
-        
-        var deleteThresholdsQuery = " DELETE FROM [dbo].[Thresholds] WHERE Id NOT IN @existingThresholdIds ";
-        
-        using var connection = _configurationsContext.CreateConnection();
 
-        try
+        var deleteThresholdsQuery = $" DELETE FROM [dbo].[Thresholds] WHERE Id NOT IN ({existingThresholdIds}) ";
+
+        using (var connection = _configurationsContext.CreateConnection())
         {
-            foreach (var threshold in existingThresholds)
+            await connection.OpenAsync();
+            using (var transaction = connection.BeginTransaction())
             {
-                await connection.ExecuteAsync(updateThresholdQuery, new
+                try
                 {
-                    threshold.Id,
-                    threshold.GroupId,
-                    threshold.ThresholdTypeId,
-                    threshold.CreatedBy,
-                    threshold.CreatedDate,
-                    threshold.UpdatedBy,
-                    threshold.UpdatedDate,
-                    threshold.ApprovedBy,
-                    threshold.AtRiskThreshold,
-                    threshold.NoDetectionThreshold,
-                    threshold.InWarningThreshold,
-                    threshold.FullThreshold
-                });
-            }
-            
-            await connection.ExecuteAsync(deleteThresholdsQuery, new { existingThresholdIds });
-            
-            foreach (var threshold in newThresholds)
-            {
-                await connection.ExecuteAsync(createThresholdQuery, new
+                    foreach (var threshold in existingThresholds)
+                    {
+                        await ExecuteInsertOrUpdateCommand(updateThresholdQuery, connection, transaction, new SqlParameter[]
+                        {
+                            new SqlParameter("@Id", threshold.Id),
+                            new SqlParameter("@GroupId", threshold.GroupId),
+                            new SqlParameter("@ThresholdTypeId", threshold.ThresholdTypeId),
+                            new SqlParameter("@UpdatedBy", threshold.UpdatedBy),
+                            new SqlParameter("@UpdatedDate", DateTime.UtcNow),
+                            new SqlParameter("@ApprovedBy", threshold.ApprovedBy),
+                            new SqlParameter("@AtRiskThreshold", threshold.AtRiskThreshold),
+                            new SqlParameter("@NoDetectionThreshold", threshold.NoDetectionThreshold),
+                            new SqlParameter("@InWarningThreshold", threshold.InWarningThreshold),
+                            new SqlParameter("@FullThreshold", threshold.FullThreshold)
+                        });
+                    }
+
+                    await ExecuteInsertOrUpdateCommand(deleteThresholdsQuery, connection, transaction, new SqlParameter[] {});
+
+                    foreach (var threshold in newThresholds)
+                    {
+                        await ExecuteInsertOrUpdateCommand(createThresholdQuery, connection, transaction, new SqlParameter[]
+                        {
+                            new SqlParameter("@GroupId", threshold.GroupId),
+                            new SqlParameter("@ThresholdTypeId", threshold.ThresholdTypeId),
+                            new SqlParameter("@CreatedBy", threshold.CreatedBy),
+                            new SqlParameter("@CreatedDate", DateTime.UtcNow),
+                            new SqlParameter("@ApprovedBy", threshold.ApprovedBy),
+                            new SqlParameter("@AtRiskThreshold", threshold.AtRiskThreshold),
+                            new SqlParameter("@NoDetectionThreshold", threshold.NoDetectionThreshold),
+                            new SqlParameter("@InWarningThreshold", threshold.InWarningThreshold),
+                            new SqlParameter("@FullThreshold", threshold.FullThreshold),
+                        });
+                    }
+
+                    transaction.Commit();
+                    return true;
+                }
+                catch (Exception ex)
                 {
-                    threshold.GroupId,
-                    threshold.ThresholdTypeId,
-                    threshold.CreatedBy,
-                    threshold.CreatedDate,
-                    threshold.UpdatedBy,
-                    threshold.UpdatedDate,
-                    threshold.ApprovedBy,
-                    threshold.AtRiskThreshold,
-                    threshold.NoDetectionThreshold,
-                    threshold.InWarningThreshold,
-                    threshold.FullThreshold
-                });
+                    transaction.Rollback();
+                    throw new ApplicationException("An error occurred while trying to upsert the thresholds", ex);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            throw new ApplicationException("An error occurred while trying to upsert the thresholds", ex);
         }
     }
 
+    private async Task ExecuteInsertOrUpdateCommand(string query, SqlConnection connection, SqlTransaction transaction, SqlParameter[] parameters)
+    {
+        using (var command = new SqlCommand(query, connection, transaction))
+        {
+            command.Parameters.AddRange(parameters);
+            await command.ExecuteNonQueryAsync();
+        }
+    }
 }
